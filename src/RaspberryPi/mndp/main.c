@@ -26,7 +26,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <error.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
 #include <dirent.h>
 #include <netinet/ip.h>
 #include <getopt.h>
@@ -43,9 +46,12 @@
 #define DEF_VERSI   "v1.0"
 
 // formatting of MAC address
-#define F_MAC "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx"
+#define F_MAC "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx"
 #define P_MAC(v) v[0], v[1], v[2], v[3], v[4], v[5]
 #define S_MAC(v) &(v[0]), &(v[1]), &(v[2]), &(v[3]), &(v[4]), &(v[5])
+
+#define F_IP "%02hhu.%02hhu.%02hhu.%02hhu"
+#define P_IP(v) ((v) >> 0) & 0xFF, ((v) >> 8) & 0xFF, ((v) >> 16) & 0xFF, ((v) >> 24) & 0xFF
 
 /******************************************************************************
  * Mikrotik MNDP protocol
@@ -110,19 +116,20 @@ void mndp_addS(struct mndp_frame *f, int id, const char *msg)
 struct iface_info
 {
     int index;
+    short flags;
     char iface_mac[6];
     char iface_name[32];    
+    //struct ether_addr hwa;
+    struct in_addr ipa;
+    struct in_addr bcast;
     struct iface_info *next;
 };
 
 struct iface_info* get_interface_infos(char * pattern)
-{
-    
+{   
     struct if_nameindex *i, *ni = if_nameindex();
-    if (!ni) {
-        perror ("Couldn't get list of iface names");
+    if (!ni) 
         return NULL;
-    }
     
     // find first interface with specified mask
     for (i = ni; (i->if_index != 0) && (i->if_name != NULL); i++ ) {
@@ -139,11 +146,9 @@ struct iface_info* get_interface_infos(char * pattern)
     root->index = i->if_index;
     strncpy(root->iface_name, i->if_name, 32); 
     root->iface_name[31] = 0;
-    root->next = NULL;
-        
+    root->next = NULL;        
     
     struct iface_info *q = root;
-    char path[256];
     
     for (i++; (i->if_index != 0) && (i->if_name != NULL); i++ ) {
         if (fnmatch(pattern, i->if_name, FNM_NOESCAPE))
@@ -158,19 +163,6 @@ struct iface_info* get_interface_infos(char * pattern)
         strncpy(q->iface_name, i->if_name, 32); 
         q->iface_name[31] = 0;
         q->next = NULL;
-        
-        // grab MAC address
-        snprintf(path, 256, "/sys/class/net/%s/address", q->iface_name);
-
-        FILE * f = fopen(path, "rb");
-        if (!f) {
-            perror("MAC file not found\n");
-            return NULL;
-        }
-        
-
-        fscanf(f, F_MAC, S_MAC(q->iface_mac));
-        fclose(f);
     }
     
     if_freenameindex(ni);
@@ -219,8 +211,12 @@ void print_usage(void)
         "\n");
 }
 
+void prog(void) { }
+
 int main(int argc, char *argv[])
 {
+  error_print_progname = prog;
+ 
     // set defaults
     int attempts = 10;
     char* iface = strdup(DEF_IFACE);
@@ -259,28 +255,76 @@ int main(int argc, char *argv[])
     }
     
     struct iface_info *ii = get_interface_infos(iface);
-    if (!ii) {
-        perror("cannot get list of interfaces!");
-        exit(EXIT_FAILURE);
-    }
+    if (!ii)
+      error(EXIT_FAILURE, errno, "cannot get list of interfaces!");
     
-    // for debugging only
-    for (struct iface_info *q = ii; q != NULL; q = q->next)
-        printf("Matching iface %s with addr " F_MAC "\n", q->iface_name, P_MAC(q->iface_mac));
 
     int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd < 0) {
-        perror("cannot create UDP socket");
-        exit(EXIT_FAILURE);
+    if (fd < 0)
+      error(EXIT_FAILURE, errno, "cannot create UDP socket");
+    
+    struct ifreq ifr;
+    // fill address infos
+    for (struct iface_info *q = ii; q != NULL; q = q->next) {
+
+#define ifr_ioctl(f, ia, r, name)                             \
+      memset(&r, 0, sizeof(r));                               \
+      strncpy(r.ifr_name, name, IF_NAMESIZE);                 \
+      if((ioctl(f, ia, &r)) < 0)                              \
+        error(EXIT_SUCCESS, errno, "ioctl["#ia"]@%s", name);
+      
+#define ALL(e,v)  (((e) & (v)) == (v))
+#define ANY(e,v)  (((e) & (v)) != 0)
+      
+      ifr_ioctl(fd, SIOCGIFHWADDR, ifr, q->iface_name);
+      memcpy(&q->iface_mac[0], &ifr.ifr_hwaddr.sa_data, 6);
+
+      ifr_ioctl(fd, SIOCGIFFLAGS, ifr, q->iface_name);
+      q->flags = ifr.ifr_flags;
+    
+      if (ALL(q->flags, IFF_UP | IFF_RUNNING)) {
+        ifr_ioctl(fd, SIOCGIFADDR, ifr, q->iface_name);
+        memcpy(&q->ipa, &(*(struct sockaddr_in *)&ifr.ifr_addr).sin_addr, 4);
+      }
+
+      if (ALL(q->flags, IFF_UP | IFF_RUNNING | IFF_BROADCAST)) {
+        ifr_ioctl(fd, SIOCGIFBRDADDR, ifr, q->iface_name);
+        memcpy(&q->bcast, &(*(struct sockaddr_in *)&ifr.ifr_broadaddr).sin_addr, 4);
+      }
+    }
+      
+    
+    // for debugging only
+    for (struct iface_info *q = ii; q != NULL; q = q->next) {
+      printf("Iface %s with hwaddr " F_MAC,
+              q->iface_name, P_MAC(q->iface_mac) );
+      
+      if (ALL(q->flags, IFF_UP | IFF_RUNNING))
+        printf(" ip " F_IP, P_IP(q->ipa.s_addr) );
+      
+      if (ALL(q->flags, IFF_UP | IFF_RUNNING | IFF_BROADCAST))
+        printf(" bcast " F_IP, P_IP(q->bcast.s_addr) );
+      
+      printf("\n");
     }
 
-    // set broadcast flag to allow send broadcast
-    int yes=1;
-    if (setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes))) {
-        close(fd);
-        perror("setsockopt (SO_BROADCAST)");
-        exit(EXIT_FAILURE);
+#define fd_setsockopt(f, it, ia, val)                             \
+    if (setsockopt(f, it, ia, &val, sizeof(val)) < 0) {           \
+      close(f);                                                   \
+      error(EXIT_FAILURE, errno, "setsockopt[" #it "," #ia "]");  \
     }
+
+    
+    int yes = 1;
+    int tos = IPTOS_LOWDELAY;
+    int ttl = 5;
+
+    fd_setsockopt(fd, SOL_SOCKET, SO_BROADCAST, yes); // allow broadcast address
+    fd_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, yes); // allow multiple sockets on same port
+    //fd_setsockopt(fd, SOL_SOCKET, SO_DONTROUTE, yes); // do not route client
+    //fd_setsockopt(fd, IPPROTO_TCP, IP_TOS, tos);
+    //fd_setsockopt(fd, IPPROTO_TCP, IP_TTL, ttl);
+    //fd_setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, "ethX")
 
     /*struct sockaddr_in sa;
     memset(&sa,0, sizeof(sa));
@@ -288,10 +332,9 @@ int main(int argc, char *argv[])
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     sa.sin_port = htons(SRCPORT);
 
-    if (bind(fd, (struct sockaddr *) &sa, sizeof(struct sockaddr_in)) < 0) {
-            perror("bind");
-            exit(EXIT_FAILURE);
-    }*/
+    if (bind(fd, (struct sockaddr *) &sa, sizeof(struct sockaddr_in)) < 0)
+            error(EXIT_FAILURE, errno, "bind");
+     */
 
     struct sockaddr_in da;
     memset(&da, 0, sizeof(da));
@@ -304,6 +347,24 @@ int main(int argc, char *argv[])
     for (int i = 0; i < attempts; i++) {
         // send broadcasts to all interfaces
         for (struct iface_info *q = ii; q != NULL; q = q->next) {
+          
+          // don't send on iface what doesnt have ip
+          if (!ALL(q->flags, IFF_UP | IFF_RUNNING))
+            continue;
+          
+          // don't send on loopback
+          if (q->flags & IFF_LOOPBACK)
+            continue;
+          
+          da.sin_addr.s_addr = q->bcast.s_addr;
+          
+            printf("Sending to " F_IP " via iface %s with addr " F_MAC "\n", 
+                    P_IP(da.sin_addr.s_addr),
+                    q->iface_name, 
+                    P_MAC(q->iface_mac));
+            
+//            
+            
             mndp_init(&mndp);
 
             mndp_addB(&mndp, MNDP_MAC, 6, q->iface_mac);
@@ -319,6 +380,7 @@ int main(int argc, char *argv[])
                     exit(EXIT_FAILURE);
             }
         }
+        fflush(stdout);
         usleep(1000000);        // wait 1sec between subsequent broadcasts
     }
 
