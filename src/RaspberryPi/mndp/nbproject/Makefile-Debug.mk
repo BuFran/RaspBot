@@ -35,7 +35,10 @@ OBJECTDIR=${CND_BUILDDIR}/${CND_CONF}/${CND_PLATFORM}
 
 # Object Files
 OBJECTFILES= \
-	${OBJECTDIR}/main.o
+	${OBJECTDIR}/commandline.o \
+	${OBJECTDIR}/ifinfo.o \
+	${OBJECTDIR}/main.o \
+	${OBJECTDIR}/proto_mndp.o
 
 
 # C Compiler Flags
@@ -62,10 +65,25 @@ ${CND_DISTDIR}/${CND_CONF}/${CND_PLATFORM}/mndp: ${OBJECTFILES}
 	${MKDIR} -p ${CND_DISTDIR}/${CND_CONF}/${CND_PLATFORM}
 	${LINK.c} -o ${CND_DISTDIR}/${CND_CONF}/${CND_PLATFORM}/mndp ${OBJECTFILES} ${LDLIBSOPTIONS}
 
+${OBJECTDIR}/commandline.o: commandline.c 
+	${MKDIR} -p ${OBJECTDIR}
+	${RM} "$@.d"
+	$(COMPILE.c) -g -Wall -D_BSD_SOURCE -std=c99 -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/commandline.o commandline.c
+
+${OBJECTDIR}/ifinfo.o: ifinfo.c 
+	${MKDIR} -p ${OBJECTDIR}
+	${RM} "$@.d"
+	$(COMPILE.c) -g -Wall -D_BSD_SOURCE -std=c99 -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/ifinfo.o ifinfo.c
+
 ${OBJECTDIR}/main.o: main.c 
 	${MKDIR} -p ${OBJECTDIR}
 	${RM} "$@.d"
-	$(COMPILE.c) -g -std=c99 -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/main.o main.c
+	$(COMPILE.c) -g -Wall -D_BSD_SOURCE -std=c99 -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/main.o main.c
+
+${OBJECTDIR}/proto_mndp.o: proto_mndp.c 
+	${MKDIR} -p ${OBJECTDIR}
+	${RM} "$@.d"
+	$(COMPILE.c) -g -Wall -D_BSD_SOURCE -std=c99 -MMD -MP -MF "$@.d" -o ${OBJECTDIR}/proto_mndp.o proto_mndp.c
 
 # Subprojects
 .build-subprojects:
